@@ -5,6 +5,7 @@
  * 功能：
  * 1. 提供静态文件服务（review.html, audio.mp3）
  * 2. POST /api/cut - 接收删除列表，执行剪辑
+ * 3. GET /api/show-notes - 读取 AI 生成的视频介绍草稿
  *
  * 用法: node review_server.js [port] [video_file]
  * 默认: port=8899, video_file=自动检测目录下的 .mp4
@@ -41,6 +42,34 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
     res.end();
+    return;
+  }
+
+  // API: 读取 AI 视频介绍草稿
+  if (req.method === 'GET' && req.url === '/api/show-notes') {
+    try {
+      const outputFile = '视频介绍草稿.md';
+      if (!fs.existsSync(outputFile)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: false,
+          error: '当前目录还没有 AI 生成的视频介绍草稿，请先在 Trae 主流程里生成。',
+        }));
+        return;
+      }
+
+      const text = fs.readFileSync(outputFile, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        output: outputFile,
+        text,
+      }));
+    } catch (err) {
+      console.error('❌ 读取视频介绍草稿失败:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
     return;
   }
 

@@ -250,6 +250,62 @@ const html = `<!DOCTYPE html>
       line-height: 1.6;
     }
 
+    /* ── 视频介绍草稿 ── */
+    .show-notes-panel {
+      margin-top: 20px;
+      padding: 18px;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+    }
+    .show-notes-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 10px;
+    }
+    .show-notes-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+    .show-notes-subtitle {
+      margin-top: 4px;
+      font-size: 12px;
+      color: #6b7280;
+      line-height: 1.6;
+    }
+    .show-notes-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .show-notes-status {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 10px;
+      line-height: 1.6;
+    }
+    .show-notes-output {
+      width: 100%;
+      min-height: 200px;
+      resize: vertical;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 12px 14px;
+      background: #f9fafb;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #111827;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .show-notes-output:focus {
+      outline: none;
+      border-color: #93c5fd;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
     /* ── 页脚署名 ── */
     .footer-credit {
       margin-top: 32px;
@@ -358,6 +414,20 @@ const html = `<!DOCTYPE html>
     <div class="copy-hint">💡 复制后发送给你的 AI 助手，它可以从中学习你的剪辑偏好，下次自动标记得更准。</div>
   </div>
 
+  <div class="show-notes-panel">
+    <div class="show-notes-header">
+      <div>
+        <div class="show-notes-title">视频介绍草稿</div>
+        <div class="show-notes-subtitle">这部分内容由 Trae 在主流程里生成，这里只负责查看和复制。</div>
+      </div>
+      <div class="show-notes-actions">
+        <button class="btn btn-copy" onclick="copyShowNotes()">复制视频介绍</button>
+      </div>
+    </div>
+    <div class="show-notes-status" id="showNotesStatus">页面会自动尝试读取已生成的视频介绍草稿。</div>
+    <textarea id="showNotesOutput" class="show-notes-output" placeholder="如果这里为空，说明这次流程还没有生成 AI 视频介绍草稿。" readonly></textarea>
+  </div>
+
   <!-- 页脚署名 -->
   <div class="footer-credit">
     原作：成峰（公众号「AI 产品自由」） · 当前版本由 Dogtor 大王（小红书）完善
@@ -383,6 +453,8 @@ const html = `<!DOCTYPE html>
     const timeDisplay = document.getElementById('time');
     const content = document.getElementById('content');
     const statsDiv = document.getElementById('stats');
+    const showNotesStatus = document.getElementById('showNotesStatus');
+    const showNotesOutput = document.getElementById('showNotesOutput');
     let elements = [];
 
     // ── 拖动选择状态 ──
@@ -579,6 +651,34 @@ const html = `<!DOCTYPE html>
       updateStats();
     }
 
+    async function loadShowNotes() {
+      showNotesStatus.textContent = '正在读取 AI 视频介绍草稿...';
+      try {
+        const res = await fetch('/api/show-notes');
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.error || '视频介绍草稿读取失败');
+        }
+        showNotesOutput.value = data.text;
+        showNotesStatus.textContent = '已读取 AI 视频介绍草稿：' + data.output;
+      } catch (err) {
+        showNotesStatus.textContent = err.message;
+      }
+    }
+
+    function copyShowNotes() {
+      const text = showNotesOutput.value.trim();
+      if (!text) {
+        alert('当前还没有可复制的视频介绍草稿');
+        return;
+      }
+      navigator.clipboard.writeText(text).then(() => {
+        showNotesStatus.textContent = '视频介绍草稿已复制到剪贴板';
+      }).catch(err => {
+        showNotesStatus.textContent = '复制失败：' + err.message;
+      });
+    }
+
     async function executeCut() {
       const videoDuration = wavesurfer.getDuration();
       const videoMinutes = (videoDuration / 60).toFixed(1);
@@ -644,6 +744,7 @@ const html = `<!DOCTYPE html>
     });
 
     render();
+    loadShowNotes();
   </script>
 </body>
 </html>`;
