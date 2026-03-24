@@ -36,6 +36,7 @@ pos: 转录+识别，到用户网页审核为止
     │   │   └── subtitles_words.json
     │   ├── 2_分析/
     │   │   ├── readable.txt
+    │   │   ├── semantic_context.md
     │   │   ├── auto_selected.json
     │   │   └── 口误分析.md
     │   └── 3_审核/
@@ -180,7 +181,7 @@ cd ..
 
 → 两条路径都输出 `subtitles_words.json`，后续步骤完全一致。
 
-### 步骤 3: 分析口误（脚本+AI）
+### 步骤 3: 分析口误（语义优先 + 规则边界）
 
 #### 3.1 生成易读格式
 
@@ -206,17 +207,7 @@ require('fs').writeFileSync('readable.txt', output.join('\\n'));
 
 先读 `用户习惯/` 目录下所有规则文件。
 
-#### 3.3 调用规则分析器（AI分析步骤）
-
-使用规则分析器执行AI口误检测：
-
-```bash
-# 调用规则分析器分析口误
-node "$SKILL_DIR/scripts/rule_based_analyzer.js" ../1_转录/subtitles_words.json sentences.txt auto_selected.json "$SKILL_DIR/用户习惯"
-# 输出: auto_selected.json（包含静音和AI检测的口误）
-```
-
-#### 3.4 生成句子列表（关键步骤）
+#### 3.3 生成句子列表（关键步骤）
 
 **必须先分句，再分析**。按静音切分成句子列表：
 
@@ -245,6 +236,24 @@ sentences.forEach((s, i) => {
 " > sentences.txt
 ```
 
+#### 3.4 生成语义分析上下文（提升输入质量）
+
+把原始字幕、分句结果、前后静音信息和重复候选整理成一份更适合 Trae 判断的材料：
+
+```bash
+node "$SKILL_DIR/scripts/build_semantic_context.js" \
+  "../1_转录/subtitles_words.json" \
+  "sentences.txt" \
+  "semantic_context.md"
+```
+
+Trae 在做内容型判断前，必须先读：
+
+- `readable.txt`
+- `sentences.txt`
+- `semantic_context.md`
+- [语义分析提示词.md](语义分析提示词.md)
+
 #### 3.5 脚本自动标记静音（必须先执行）
 
 ```bash
@@ -261,23 +270,57 @@ console.log('≥0.5s静音数量:', selected.length);
 
 → 输出 `auto_selected.json`（只含静音 idx）
 
-#### 3.6 AI 分析口误（追加到 auto_selected.json）
+#### 3.6 Trae 语义分析口误（追加到 auto_selected.json）
+
+这一步默认由 Trae 直接做语义判断，不要先调用 `rule_based_analyzer.js`。
+
+目标不是“逐条套规则”，而是先判断这段话在语义上是否成立，再决定哪些词或句子应该删。`用户习惯/` 里的规则只作为边界和偏好，不是替代理解上下文。
 
 **检测规则（按优先级）**：
 
 | # | 类型 | 判断方法 | 删除范围 |
 |---|------|----------|----------|
-| 1 | 重复句 | 相邻句子开头≥5字相同 | 较短的**整句** |
-| 2 | 隔一句重复 | 中间是残句时，比对前后句 | 前句+残句 |
-| 3 | 残句 | 话说一半+静音 | **整个残句** |
-| 4 | 句内重复 | A+中间+A 模式 | 前面部分 |
-| 5 | 卡顿词 | 那个那个、就是就是 | 前面部分 |
-| 6 | 重说纠正 | 部分重复/否定纠正 | 前面部分 |
-| 7 | 语气词 | 嗯、啊、那个 | 标记但不自动删 |
+| 1 | 重复句 | 相邻句或隔一句在表达同一意思，后句更完整 | 较短或被修正的**整句** |
+| 2 | 残句 | 话说到一半就断了，语义不成立 | **整个残句** |
+| 3 | 重说纠正 | 前面那句明显在试探/修正，后面才是正式表达 | 前一段 |
+| 4 | 句内重复 | 同一句里明显重复说了一次，影响听感 | 前面多余部分 |
+| 5 | 卡顿词 | 那个那个、就是就是、没有没有 | 前面重复部分 |
+| 6 | 语气词 | 嗯、啊、呃 | 默认只标记，不自动大删 |
 
 **核心原则**：
-- **先分句，再比对**：用 sentences.txt 比对相邻句子
+- **语义优先**：先判断保留后是否自然，再决定是否删除
+- **规则只做边界**：长静音、桥接小停顿、明显连续卡顿可以脚本辅助；高歧义内容必须由 Trae 语义判断
+- **先分句，再比对**：用 sentences.txt 看前后句之间的关系
 - **整句删除**：残句、重复句都要删整句，不只是删异常的几个字
+- **不要机械删语气词**：如果词本身是内容的一部分，例如“免费额度”的“额”，不能因为像语气词就删掉
+
+#### 3.7 写入 `auto_selected.json` 和 `口误分析.md`
+
+在静音初始结果基础上，把 Trae 语义判断出来的 idx 追加进 `auto_selected.json`，并同步写一份 `口误分析.md`。
+
+要求：
+
+- 每一段都写清楚 `idx`、时间、类型、内容、为什么删
+- 只把真正高置信的内容型口误放进默认预选
+- 有争议的句子宁可不预选，留给审核页人工勾选
+- `auto_selected.json` 里只存 idx 数组，不要写说明文字
+
+#### 3.8 规范化 `auto_selected.json`
+
+语义分析写完后，再执行一次规范化，只做低风险边界处理：
+
+```bash
+node "$SKILL_DIR/scripts/refine_auto_selected.js" \
+  "../1_转录/subtitles_words.json" \
+  "auto_selected.json"
+```
+
+这个脚本只负责两件事：
+
+- 去重、排序、过滤非法 idx
+- 如果一个 `<0.5s` 的停顿前后都已经被选中删除，则把这个小停顿也补进来
+
+不要把“重复句 / 残句 / 重说纠正”的判断再交回规则脚本。
 
 🚨 **关键警告：行号 ≠ idx**
 
@@ -298,7 +341,7 @@ readable.txt 格式: idx|内容|时间
 | 65-75 | 15.80-17.66 | 重复句 | "这是我剪出来的一个案例" | 删 |
 ```
 
-#### 3.7 生成视频介绍草稿
+#### 3.9 生成视频介绍草稿
 
 这一步必须由 Trae 直接完成，不要用本地模板脚本代写。
 
@@ -351,7 +394,7 @@ node "$SKILL_DIR/scripts/review_server.js" 8899 "$VIDEO_PATH"
 ### auto_selected.json
 
 ```json
-[72, 85, 120]  // Claude 分析生成的预选索引
+[72, 85, 120]  // Trae 语义分析 + 规则边界生成的预选索引
 ```
 
 ---
@@ -363,6 +406,7 @@ node "$SKILL_DIR/scripts/review_server.js" 8899 "$VIDEO_PATH"
 ```bash
 VOLCENGINE_API_KEY=xxx    # 火山引擎 API Key
 ASR_ENGINE=volcengine     # 转录方案: volcengine / whisper，留空每次询问
+OUTPUT_DIR=/path/to/输出目录  # 剪辑后视频输出目录，留空则使用项目目录下的 output/
 ```
 
 ### 火山引擎 API Key

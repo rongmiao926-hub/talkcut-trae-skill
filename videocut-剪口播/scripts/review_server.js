@@ -24,6 +24,22 @@ function findVideoFile() {
   return files[0] || 'source.mp4';
 }
 
+function loadEnv() {
+  const envPath = path.join(__dirname, '../../.env');
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf8');
+    content.split('\n').forEach(line => {
+      const [key, ...values] = line.split('=');
+      if (key && values.length > 0) {
+        process.env[key.trim()] = values.join('=').trim();
+      }
+    });
+  }
+}
+loadEnv();
+
+const OUTPUT_DIR = process.env.OUTPUT_DIR || null;
+
 const MIME_TYPES = {
   '.html': 'text/html',
   '.js': 'application/javascript',
@@ -87,37 +103,50 @@ const server = http.createServer((req, res) => {
 
         // 生成输出文件名
         const baseName = path.basename(VIDEO_FILE, '.mp4');
-        const outputFile = `${baseName}_cut.mp4`;
+        let outputFile = `${baseName}_cut.mp4`;
+        let finalOutputPath = outputFile;
+        
+        if (OUTPUT_DIR) {
+          if (!fs.existsSync(OUTPUT_DIR)) {
+            fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+          }
+          finalOutputPath = path.join(OUTPUT_DIR, outputFile);
+        }
 
-        // 执行剪辑
-        const scriptPath = path.join(__dirname, 'cut_video.sh');
+        // 执行剪辑：优先用 cut_video.js，其次 cut_video.sh，最后内置逻辑
+        const jsScriptPath = path.join(__dirname, 'cut_video.js');
+        const shScriptPath = path.join(__dirname, 'cut_video.sh');
 
-        if (!fs.existsSync(scriptPath)) {
-          // 如果没有 cut_video.sh，用内置的 ffmpeg 命令
-          console.log('🎬 执行剪辑...');
-          executeFFmpegCut(VIDEO_FILE, deleteList, outputFile);
-        } else {
-          console.log('🎬 调用 cut_video.sh...');
-          execSync(`bash "${scriptPath}" "${VIDEO_FILE}" delete_segments.json "${outputFile}"`, {
+        if (fs.existsSync(jsScriptPath)) {
+          console.log('🎬 调用 cut_video.js...');
+          execSync(`node "${jsScriptPath}" "${VIDEO_FILE}" delete_segments.json "${finalOutputPath}"`, {
             stdio: 'inherit'
           });
+        } else if (fs.existsSync(shScriptPath) && process.platform !== 'win32') {
+          console.log('🎬 调用 cut_video.sh...');
+          execSync(`bash "${shScriptPath}" "${VIDEO_FILE}" delete_segments.json "${finalOutputPath}"`, {
+            stdio: 'inherit'
+          });
+        } else {
+          console.log('🎬 执行剪辑...');
+          executeFFmpegCut(VIDEO_FILE, deleteList, finalOutputPath);
         }
 
         // 获取剪辑前后的时长信息
         const originalDuration = parseFloat(execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${VIDEO_FILE}"`).toString().trim());
-        const newDuration = parseFloat(execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${outputFile}"`).toString().trim());
+        const newDuration = parseFloat(execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${finalOutputPath}"`).toString().trim());
         const deletedDuration = originalDuration - newDuration;
         const savedPercent = ((deletedDuration / originalDuration) * 100).toFixed(1);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: true,
-          output: outputFile,
+          output: finalOutputPath,
           originalDuration: originalDuration.toFixed(2),
           newDuration: newDuration.toFixed(2),
           deletedDuration: deletedDuration.toFixed(2),
           savedPercent: savedPercent,
-          message: `剪辑完成: ${outputFile}`
+          message: `剪辑完成: ${finalOutputPath}`
         }));
 
       } catch (err) {
@@ -219,10 +248,11 @@ function getEncoder() {
 // 内置 FFmpeg 剪辑逻辑（filter_complex 精确剪辑 + buffer + crossfade）
 function executeFFmpegCut(input, deleteList, output) {
   // 配置参数
-  const BUFFER_MS = 50;     // 删除范围前后各扩展 50ms（吃掉气口和残音）
-  const CROSSFADE_MS = 30;  // 音频淡入淡出 30ms
+  const BUFFER_MS = 0;        // 删除范围不扩展（精确删除）
+  const CROSSFADE_MS = 30;    // 音频淡入淡出 30ms（暂未使用）
+  const PADDING_MS = 300;     // 保留片段结尾预留 300ms 间隔（避免尾字被吞）
 
-  console.log(`⚙️ 优化参数: 扩展范围=${BUFFER_MS}ms, 音频crossfade=${CROSSFADE_MS}ms`);
+  console.log(`⚙️ 优化参数: 扩展范围=${BUFFER_MS}ms, 音频crossfade=${CROSSFADE_MS}ms, 片段间隔=${PADDING_MS}ms`);
 
   // 检测音频偏移量（audio.mp3 的 start_time）
   let audioOffset = 0;
@@ -261,48 +291,71 @@ function executeFFmpegCut(input, deleteList, output) {
     }
   }
 
-  // 计算保留片段
+  // 计算保留片段（每个片段结尾预留 padding）
+  const paddingSec = PADDING_MS / 1000;
   const keepSegments = [];
   let cursor = 0;
+  let deleteIdx = 0;  // 追踪当前删除片段的索引
 
-  for (const del of mergedDelete) {
+  for (let i = 0; i < mergedDelete.length; i++) {
+    const del = mergedDelete[i];
     if (del.start > cursor) {
-      keepSegments.push({ start: cursor, end: del.start });
+      // 保留片段：从 cursor 到 del.start
+      keepSegments.push({ 
+        start: cursor, 
+        end: del.start,
+        nextDeleteStart: del.start  // 记录下一个删除片段的开始时间
+      });
     }
     cursor = del.end;
   }
   if (cursor < duration) {
-    keepSegments.push({ start: cursor, end: duration });
+    keepSegments.push({ 
+      start: cursor, 
+      end: duration,
+      nextDeleteStart: duration  // 最后一个片段，没有下一个删除片段
+    });
   }
 
-  console.log(`保留 ${keepSegments.length} 个片段，删除 ${mergedDelete.length} 个片段`);
+  // 为每个保留片段的结尾添加 padding（避免尾字被吞）
+  for (let i = 0; i < keepSegments.length; i++) {
+    const seg = keepSegments[i];
+    // 结尾预留 padding（但不能超过下一个删除片段的开始）
+    seg.end = Math.min(seg.nextDeleteStart, seg.end + paddingSec);
+  }
+
+  // 合并重叠的保留片段（padding 可能导致重叠）
+  const mergedKeep = [];
+  for (const seg of keepSegments) {
+    if (mergedKeep.length === 0 || seg.start > mergedKeep[mergedKeep.length - 1].end) {
+      mergedKeep.push({ ...seg });
+    } else {
+      mergedKeep[mergedKeep.length - 1].end = Math.max(mergedKeep[mergedKeep.length - 1].end, seg.end);
+    }
+  }
+
+  console.log(`保留 ${mergedKeep.length} 个片段，删除 ${mergedDelete.length} 个片段`);
 
   // 生成 filter_complex（带 crossfade）
   let filters = [];
   let vconcat = '';
 
-  for (let i = 0; i < keepSegments.length; i++) {
-    const seg = keepSegments[i];
+  for (let i = 0; i < mergedKeep.length; i++) {
+    const seg = mergedKeep[i];
     filters.push(`[0:v]trim=start=${seg.start.toFixed(3)}:end=${seg.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`);
     filters.push(`[0:a]atrim=start=${seg.start.toFixed(3)}:end=${seg.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
     vconcat += `[v${i}]`;
   }
 
   // 视频直接 concat
-  filters.push(`${vconcat}concat=n=${keepSegments.length}:v=1:a=0[outv]`);
+  filters.push(`${vconcat}concat=n=${mergedKeep.length}:v=1:a=0[outv]`);
 
-  // 音频使用 acrossfade 逐个拼接（消除接缝咔声）
-  if (keepSegments.length === 1) {
-    filters.push(`[a0]anull[outa]`);
-  } else {
-    let currentLabel = 'a0';
-    for (let i = 1; i < keepSegments.length; i++) {
-      const nextLabel = `a${i}`;
-      const outLabel = (i === keepSegments.length - 1) ? 'outa' : `amid${i}`;
-      filters.push(`[${currentLabel}][${nextLabel}]acrossfade=d=${crossfadeSec.toFixed(3)}:c1=tri:c2=tri[${outLabel}]`);
-      currentLabel = outLabel;
-    }
+  // 音频直接 concat（不用 acrossfade，避免吃掉尾字）
+  let aconcat = '';
+  for (let i = 0; i < mergedKeep.length; i++) {
+    aconcat += `[a${i}]`;
   }
+  filters.push(`${aconcat}concat=n=${mergedKeep.length}:v=0:a=1[outa]`);
 
   const filterComplex = filters.join(';');
 
@@ -319,25 +372,25 @@ function executeFFmpegCut(input, deleteList, output) {
     console.log(`📹 新时长: ${newDuration.toFixed(2)}s`);
   } catch (err) {
     console.error('FFmpeg 执行失败，尝试分段方案...');
-    executeFFmpegCutFallback(input, keepSegments, output);
+    executeFFmpegCutFallback(input, mergedKeep, output);
   }
 }
 
 // 备用方案：分段切割 + concat（当 filter_complex 失败时使用）
-function executeFFmpegCutFallback(input, keepSegments, output) {
+function executeFFmpegCutFallback(input, mergedKeep, output) {
   const tmpDir = `tmp_cut_${Date.now()}`;
   fs.mkdirSync(tmpDir, { recursive: true });
 
   try {
     const partFiles = [];
-    keepSegments.forEach((seg, i) => {
+    mergedKeep.forEach((seg, i) => {
       const partFile = path.join(tmpDir, `part${i.toString().padStart(4, '0')}.mp4`);
       const segDuration = seg.end - seg.start;
 
       const encoder = getEncoder();
       const cmd = `ffmpeg -y -ss ${seg.start.toFixed(3)} -i "file:${input}" -t ${segDuration.toFixed(3)} -c:v ${encoder.name} ${encoder.args} -c:a aac -b:a 128k -avoid_negative_ts make_zero "${partFile}"`;
 
-      console.log(`切割片段 ${i + 1}/${keepSegments.length}: ${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s`);
+      console.log(`切割片段 ${i + 1}/${mergedKeep.length}: ${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s`);
       execSync(cmd, { stdio: 'pipe' });
       partFiles.push(partFile);
     });

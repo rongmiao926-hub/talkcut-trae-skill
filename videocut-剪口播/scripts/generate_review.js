@@ -463,6 +463,7 @@ const html = `<!DOCTYPE html>
     let dragMode = 'add';
     let dragMoved = false;
     let dragPreviewSet = new Set();
+    let suppressAutoScrollUntil = 0;
 
     function formatTime(sec) {
       const m = Math.floor(sec / 60);
@@ -475,6 +476,10 @@ const html = `<!DOCTYPE html>
       const m = Math.floor(totalSec / 60);
       const s = (totalSec % 60).toFixed(1);
       return m > 0 ? \`\${m}分\${s}秒 (\${totalSec}s)\` : \`\${s}秒\`;
+    }
+
+    function suppressAutoScroll(ms = 350) {
+      suppressAutoScrollUntil = Date.now() + ms;
     }
 
     function applyClass(el, i) {
@@ -559,6 +564,7 @@ const html = `<!DOCTYPE html>
 
       if (!dragMoved) {
         // 没有移动 = 单击 → 跳转播放
+        suppressAutoScroll();
         wavesurfer.setTime(words[dragStartIdx].start);
       } else {
         // 有移动 = 拖动 → 批量选中/取消
@@ -580,6 +586,7 @@ const html = `<!DOCTYPE html>
     content.addEventListener('dblclick', e => {
       const target = e.target.closest('[data-index]');
       if (!target) return;
+      suppressAutoScroll();
       const i = parseInt(target.dataset.index);
       if (selected.has(i)) selected.delete(i);
       else selected.add(i);
@@ -595,6 +602,7 @@ const html = `<!DOCTYPE html>
 
     // ── 播放跟踪 ──
     wavesurfer.on('timeupdate', (t) => {
+      const allowAutoScroll = wavesurfer.isPlaying() && Date.now() >= suppressAutoScrollUntil;
       if (wavesurfer.isPlaying()) {
         const sorted = Array.from(selected).sort((a, b) => a - b);
         for (const i of sorted) {
@@ -618,7 +626,9 @@ const html = `<!DOCTYPE html>
         if (t >= w.start && t < w.end) {
           if (!el.classList.contains('current')) {
             el.classList.add('current');
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (allowAutoScroll) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
           }
         } else {
           el.classList.remove('current');
