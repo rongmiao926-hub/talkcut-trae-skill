@@ -105,6 +105,10 @@ const html = `<!DOCTYPE html>
       color: #999;
       margin-right: 4px;
     }
+    .native-audio {
+      width: 100%;
+      margin: 10px 0 0;
+    }
     #waveform {
       background: #fff;
       border-radius: 8px;
@@ -378,6 +382,7 @@ const html = `<!DOCTYPE html>
       <span class="time-display" id="time">00:00 / 00:00</span>
       <button class="btn btn-cut" onclick="executeCut()">执行剪辑</button>
     </div>
+    <audio id="nativeAudio" class="native-audio" controls preload="metadata" src="${audioBaseName}"></audio>
     <div id="waveform"></div>
     <div class="help-section">
       <div class="help-title">操作说明</div>
@@ -386,7 +391,7 @@ const html = `<!DOCTYPE html>
         <li><strong>拖动</strong>鼠标：框选一段文字，松开后批量选中（再次拖动已选中的区域可取消）</li>
         <li><strong>双击</strong>文字：选中或取消单个字</li>
         <li>键盘快捷键：<kbd>空格</kbd> 播放/暂停，<kbd>←</kbd><kbd>→</kbd> 前后跳 1 秒，<kbd>Shift</kbd>+方向键跳 5 秒</li>
-        <li>播放时会自动跳过已选中（标记删除）的片段，方便预览剪辑后的效果</li>
+        <li>默认使用上面的原生音频播放器直接试听，WaveSurfer 只负责波形和定位</li>
       </ul>
     </div>
   </div>
@@ -437,17 +442,19 @@ const html = `<!DOCTYPE html>
     const words = ${JSON.stringify(words)};
     const autoSelected = new Set(${JSON.stringify(autoSelected)});
     const selected = new Set(autoSelected);
+    const nativeAudio = document.getElementById('nativeAudio');
 
     const wavesurfer = WaveSurfer.create({
       container: '#waveform',
+      backend: 'MediaElement',
+      media: nativeAudio,
       waveColor: '#c4c9d4',
       progressColor: '#2563eb',
       cursorColor: '#f59e0b',
       height: 64,
       barWidth: 2,
       barGap: 1,
-      barRadius: 2,
-      url: '${audioBaseName}'
+      barRadius: 2
     });
 
     const timeDisplay = document.getElementById('time');
@@ -603,23 +610,6 @@ const html = `<!DOCTYPE html>
     // ── 播放跟踪 ──
     wavesurfer.on('timeupdate', (t) => {
       const allowAutoScroll = wavesurfer.isPlaying() && Date.now() >= suppressAutoScrollUntil;
-      if (wavesurfer.isPlaying()) {
-        const sorted = Array.from(selected).sort((a, b) => a - b);
-        for (const i of sorted) {
-          const w = words[i];
-          if (t >= w.start && t < w.end) {
-            let endTime = w.end;
-            let j = sorted.indexOf(i) + 1;
-            while (j < sorted.length) {
-              const nw = words[sorted[j]];
-              if (nw.start - endTime < 0.1) { endTime = nw.end; j++; }
-              else break;
-            }
-            wavesurfer.setTime(endTime);
-            return;
-          }
-        }
-      }
       timeDisplay.textContent = \`\${formatTime(t)} / \${formatTime(wavesurfer.getDuration())}\`;
       elements.forEach((el, i) => {
         const w = words[i];
