@@ -3,21 +3,64 @@
  * 生成审核网页（wavesurfer.js 版本）
  *
  * 用法: node generate_review.js <subtitles_words.json> [auto_selected.json] [audio_file]
- * 输出: review.html, audio.mp3（复制到当前目录）
+ * 输出: review.html, audio.*（复制到当前目录）
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const subtitlesFile = process.argv[2] || 'subtitles_words.json';
 const autoSelectedFile = process.argv[3] || 'auto_selected.json';
-const audioFile = process.argv[4] || 'audio.mp3';
+const audioFile = process.argv[4] || 'audio.wav';
 
 // 复制音频文件到当前目录（避免相对路径问题）
-const audioBaseName = 'audio.mp3';
+const inputAudioExt = path.extname(audioFile) || '.wav';
+const audioBaseName = `audio${inputAudioExt}`;
 if (audioFile !== audioBaseName && fs.existsSync(audioFile)) {
   fs.copyFileSync(audioFile, audioBaseName);
   console.log('📁 已复制音频到当前目录:', audioBaseName);
+}
+
+const reviewAudioBaseName = audioBaseName;
+let previewAudioBaseName = reviewAudioBaseName;
+let previewAudioOffsetSec = 0;
+
+const timelineMetadataSource = path.join(path.dirname(audioFile), 'audio_timeline.json');
+if (fs.existsSync(timelineMetadataSource)) {
+  fs.copyFileSync(timelineMetadataSource, 'audio_timeline.json');
+  console.log('📁 已复制时间轴元数据到当前目录: audio_timeline.json');
+
+  try {
+    const timelineMetadata = JSON.parse(fs.readFileSync(timelineMetadataSource, 'utf8'));
+    const sourceVideo = String(timelineMetadata.sourceVideo || '').trim();
+    const sourceAudioStartSec = Number(timelineMetadata.sourceAudioStartSec);
+    const previewSourceName = 'audio_source.wav';
+
+    if (Number.isFinite(sourceAudioStartSec)) {
+      if (sourceVideo && fs.existsSync(sourceVideo)) {
+        const previewIsFresh = fs.existsSync(previewSourceName)
+          && fs.statSync(previewSourceName).mtimeMs >= fs.statSync(sourceVideo).mtimeMs;
+
+        if (!previewIsFresh) {
+          execSync(
+            `ffmpeg -y -i "${sourceVideo}" -map 0:a:0 -c:a pcm_s16le "${previewSourceName}"`,
+            { stdio: 'pipe' }
+          );
+          console.log('🎧 已生成源音轨预览音频:', previewSourceName);
+        }
+      } else if (fs.existsSync(previewSourceName)) {
+        console.log('🎧 源视频路径已变化，继续复用当前目录里的源音轨预览音频:', previewSourceName);
+      }
+
+      if (fs.existsSync(previewSourceName)) {
+        previewAudioBaseName = previewSourceName;
+        previewAudioOffsetSec = sourceAudioStartSec;
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ 解析时间轴元数据或生成源音轨预览失败，将回退到审核音频播放');
+  }
 }
 
 if (!fs.existsSync(subtitlesFile)) {
@@ -382,7 +425,7 @@ const html = `<!DOCTYPE html>
       <span class="time-display" id="time">00:00 / 00:00</span>
       <button class="btn btn-cut" onclick="executeCut()">执行剪辑</button>
     </div>
-    <audio id="nativeAudio" class="native-audio" controls preload="metadata" src="${audioBaseName}"></audio>
+    <audio id="nativeAudio" class="native-audio" controls preload="metadata" src="${previewAudioBaseName}"></audio>
     <div id="waveform"></div>
     <div class="help-section">
       <div class="help-title">操作说明</div>
@@ -391,7 +434,7 @@ const html = `<!DOCTYPE html>
         <li><strong>拖动</strong>鼠标：框选一段文字，松开后批量选中（再次拖动已选中的区域可取消）</li>
         <li><strong>双击</strong>文字：选中或取消单个字</li>
         <li>键盘快捷键：<kbd>空格</kbd> 播放/暂停，<kbd>←</kbd><kbd>→</kbd> 前后跳 1 秒，<kbd>Shift</kbd>+方向键跳 5 秒</li>
-        <li>默认使用上面的原生音频播放器直接试听，WaveSurfer 只负责波形和定位</li>
+        <li>默认优先使用源视频主音轨试听；如果源路径失效，就继续复用当前目录里已有的源音轨预览文件</li>
       </ul>
     </div>
   </div>
@@ -443,6 +486,7 @@ const html = `<!DOCTYPE html>
     const autoSelected = new Set(${JSON.stringify(autoSelected)});
     const selected = new Set(autoSelected);
     const nativeAudio = document.getElementById('nativeAudio');
+    const previewAudioOffsetSec = ${JSON.stringify(previewAudioOffsetSec)};
 
     const wavesurfer = WaveSurfer.create({
       container: '#waveform',
@@ -471,6 +515,14 @@ const html = `<!DOCTYPE html>
     let dragMoved = false;
     let dragPreviewSet = new Set();
     let suppressAutoScrollUntil = 0;
+
+    function timelineToPreviewTime(sec) {
+      return Math.max(0, sec - previewAudioOffsetSec);
+    }
+
+    function previewToTimelineTime(sec) {
+      return sec + previewAudioOffsetSec;
+    }
 
     function formatTime(sec) {
       const m = Math.floor(sec / 60);
@@ -572,7 +624,7 @@ const html = `<!DOCTYPE html>
       if (!dragMoved) {
         // 没有移动 = 单击 → 跳转播放
         suppressAutoScroll();
-        wavesurfer.setTime(words[dragStartIdx].start);
+        wavesurfer.setTime(timelineToPreviewTime(words[dragStartIdx].start));
       } else {
         // 有移动 = 拖动 → 批量选中/取消
         const min = Math.min(dragStartIdx, endIdx);
@@ -608,9 +660,10 @@ const html = `<!DOCTYPE html>
     }
 
     // ── 播放跟踪 ──
-    wavesurfer.on('timeupdate', (t) => {
+    wavesurfer.on('timeupdate', (rawTime) => {
+      const t = previewToTimelineTime(rawTime);
       const allowAutoScroll = wavesurfer.isPlaying() && Date.now() >= suppressAutoScrollUntil;
-      timeDisplay.textContent = \`\${formatTime(t)} / \${formatTime(wavesurfer.getDuration())}\`;
+      timeDisplay.textContent = \`\${formatTime(t)} / \${formatTime(previewToTimelineTime(wavesurfer.getDuration()))}\`;
       elements.forEach((el, i) => {
         const w = words[i];
         if (t >= w.start && t < w.end) {
@@ -680,7 +733,7 @@ const html = `<!DOCTYPE html>
     }
 
     async function executeCut() {
-      const videoDuration = wavesurfer.getDuration();
+      const videoDuration = previewToTimelineTime(wavesurfer.getDuration());
       const videoMinutes = (videoDuration / 60).toFixed(1);
       const estimatedTime = Math.max(5, Math.ceil(videoDuration / 4));
       const estText = estimatedTime >= 60
@@ -739,8 +792,14 @@ const html = `<!DOCTYPE html>
 
     document.addEventListener('keydown', e => {
       if (e.code === 'Space') { e.preventDefault(); wavesurfer.playPause(); }
-      else if (e.code === 'ArrowLeft') { wavesurfer.setTime(Math.max(0, wavesurfer.getCurrentTime() - (e.shiftKey ? 5 : 1))); }
-      else if (e.code === 'ArrowRight') { wavesurfer.setTime(wavesurfer.getCurrentTime() + (e.shiftKey ? 5 : 1)); }
+      else if (e.code === 'ArrowLeft') {
+        const delta = e.shiftKey ? 5 : 1;
+        wavesurfer.setTime(Math.max(0, timelineToPreviewTime(previewToTimelineTime(wavesurfer.getCurrentTime()) - delta)));
+      }
+      else if (e.code === 'ArrowRight') {
+        const delta = e.shiftKey ? 5 : 1;
+        wavesurfer.setTime(timelineToPreviewTime(previewToTimelineTime(wavesurfer.getCurrentTime()) + delta));
+      }
     });
 
     render();

@@ -3,7 +3,7 @@
  * 审核服务器
  *
  * 功能：
- * 1. 提供静态文件服务（review.html, audio.mp3）
+ * 1. 提供静态文件服务（review.html, audio.*）
  * 2. POST /api/cut - 接收删除列表，执行剪辑
  * 3. GET /api/show-notes - 读取 AI 生成的视频介绍草稿
  *
@@ -254,10 +254,11 @@ function executeFFmpegCut(input, deleteList, output) {
 
   console.log(`⚙️ 优化参数: 扩展范围=${BUFFER_MS}ms, 音频crossfade=${CROSSFADE_MS}ms, 片段间隔=${PADDING_MS}ms`);
 
-  // 检测音频偏移量（audio.mp3 的 start_time）
+  // 检测审核音频偏移量（优先 audio.wav，其次 audio.mp3）
   let audioOffset = 0;
   try {
-    const offsetCmd = `ffprobe -v error -show_entries format=start_time -of csv=p=0 audio.mp3`;
+    const reviewAudioFile = fs.existsSync('audio.wav') ? 'audio.wav' : 'audio.mp3';
+    const offsetCmd = `ffprobe -v error -show_entries format=start_time -of csv=p=0 ${reviewAudioFile}`;
     audioOffset = parseFloat(execSync(offsetCmd).toString().trim()) || 0;
     if (audioOffset > 0) {
       console.log(`🔧 检测到音频偏移: ${audioOffset.toFixed(3)}s，自动补偿`);

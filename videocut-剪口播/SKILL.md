@@ -96,8 +96,8 @@ cd "$BASE_DIR"
 ```bash
 cd 1_转录
 
-# 提取音频（文件名有冒号需加 file: 前缀）
-ffmpeg -i "file:$VIDEO_PATH" -vn -acodec libmp3lame -y audio.mp3
+# 提取和视频时间轴对齐的审核音频
+node "$SKILL_DIR/scripts/extract_review_audio.js" "$VIDEO_PATH" audio.wav audio_timeline.json
 ```
 
 ### 步骤 2: 转录（分支）
@@ -132,6 +132,7 @@ ffmpeg -i "file:$VIDEO_PATH" -vn -acodec libmp3lame -y audio.mp3
 
 ```bash
 # 1. 上传获取公网 URL
+ffmpeg -y -i audio.wav -c:a libmp3lame audio.mp3
 curl -s -F "files[]=@audio.mp3" https://uguu.se/upload
 # 返回: {"success":true,"files":[{"url":"https://h.uguu.se/xxx.mp3"}]}
 
@@ -171,7 +172,7 @@ python3 -c "import mlx_whisper" 2>/dev/null || pip3 install mlx-whisper
 执行转录（首次运行会自动下载模型，约 1.5GB）：
 
 ```bash
-python3 "$SKILL_DIR/scripts/whisper_transcribe.py" audio.mp3
+python3 "$SKILL_DIR/scripts/whisper_transcribe.py" audio.wav
 # 直接输出: subtitles_words.json（已包含 gap 检测，无需再调 generate_subtitles.js）
 ```
 
@@ -364,7 +365,7 @@ readable.txt 格式: idx|内容|时间
 cd ../3_审核
 
 # 6. 生成审核网页
-node "$SKILL_DIR/scripts/generate_review.js" ../1_转录/subtitles_words.json ../2_分析/auto_selected.json ../1_转录/audio.mp3
+node "$SKILL_DIR/scripts/generate_review.js" ../1_转录/subtitles_words.json ../2_分析/auto_selected.json ../1_转录/audio.wav
 # 输出: review.html
 
 # 7. 启动审核服务器
