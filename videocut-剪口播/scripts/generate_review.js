@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { normalizeSelectedIndices } = require('./auto_selected_utils');
 
 const subtitlesFile = process.argv[2] || 'subtitles_words.json';
 const autoSelectedFile = process.argv[3] || 'auto_selected.json';
@@ -72,8 +73,13 @@ const words = JSON.parse(fs.readFileSync(subtitlesFile, 'utf8'));
 let autoSelected = [];
 
 if (fs.existsSync(autoSelectedFile)) {
-  autoSelected = JSON.parse(fs.readFileSync(autoSelectedFile, 'utf8'));
+  const rawAutoSelected = JSON.parse(fs.readFileSync(autoSelectedFile, 'utf8'));
+  const normalized = normalizeSelectedIndices(words, rawAutoSelected);
+  autoSelected = normalized.indices;
   console.log('AI 预选:', autoSelected.length, '个元素');
+  if (normalized.addedBridgeGaps > 0) {
+    console.log('🔗 已补充夹在删除段之间的短停顿:', normalized.addedBridgeGaps, '个');
+  }
 }
 
 const html = `<!DOCTYPE html>
@@ -149,8 +155,7 @@ const html = `<!DOCTYPE html>
       margin-right: 4px;
     }
     .native-audio {
-      width: 100%;
-      margin: 10px 0 0;
+      display: none;
     }
     #waveform {
       background: #fff;
@@ -425,7 +430,7 @@ const html = `<!DOCTYPE html>
       <span class="time-display" id="time">00:00 / 00:00</span>
       <button class="btn btn-cut" onclick="executeCut()">执行剪辑</button>
     </div>
-    <audio id="nativeAudio" class="native-audio" controls preload="metadata" src="${previewAudioBaseName}"></audio>
+    <audio id="nativeAudio" class="native-audio" preload="metadata" src="${previewAudioBaseName}"></audio>
     <div id="waveform"></div>
     <div class="help-section">
       <div class="help-title">操作说明</div>
